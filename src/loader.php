@@ -86,12 +86,41 @@ class Loader {
 	}
 
 	/**
+	 * Be a little flexible in how operation name is sent.
+	 *
+	 * @param  array $request_data Request data.
+	 * @return string
+	 */
+	private function get_operation_name( $request_data ) {
+		foreach( [ 'operationName', 'operation_name' ] as $key ) {
+			if ( ! empty( $request_data[ $key ] ) ) {
+				return $request_data[ $key ];
+			}
+		}
+
+		return 'UnnamedQuery';
+	}
+
+	/**
 	 * Attempts to load a persisted query corresponding to a query ID (hash).
 	 *
 	 * @param  string $query_id Query ID
 	 * @return string Query
 	 */
-	public function load( $query_id ) {
+	private function load( $query_id ) {
+		/**
+		 * Allow other implementors to load queries.
+		 *
+		 * @param string $query    Persisted query.
+		 * @param string $query_id Query ID.
+		 * @since 1.1.0
+		 */
+		$query = apply_filters( "{$this->namespace}_load_query", null, $query_id );
+		if ( $query ) {
+			return $query;
+		}
+
+		// If query has been persisted to our custom post type, return it.
 		$post = get_page_by_path( $query_id, 'OBJECT', $this->post_type );
 
 		return isset( $post->post_content ) ? $post->post_content : null;
@@ -116,7 +145,7 @@ class Loader {
 
 		// Client sends *both* queryId and query == request to persist query.
 		if ( $has_query_id && $has_query ) {
-			$this->save( $query_id, $request_data['query'], $request_data['operationName'] );
+			$this->save( $query_id, $request_data['query'], $this->get_operation_name( $request_data ) );
 		}
 
 		// Client sends queryId but *not* query == optimistic request to use
@@ -137,36 +166,34 @@ class Loader {
 	}
 
 	/**
-	 * Register the persisted query post type. We could filter a lot of individual
-	 * values here, but we won't. If further customization is wanted, filter
-	 * register_post_type_args.
+	 * Register the persisted query post type.
 	 *
 	 * @return void
 	 */
 	private function register_post_type() {
-		/**
-		 * Whether persisted queries can be themselves queried via GraphQL. 💅
-		 *
-		 * @param bool $show_in_graphql Show in GraphQL?
-		 * @since 1.0.0
-		 */
-		$show_in_graphql = apply_filters( "{$this->namespace}_show_in_graphql", false );
+		$post_type_args = [
+			'label'               => 'Queries',
+			'public'              => false,
+			'query_var'           => false,
+			'rewrite'             => false,
+			'show_in_rest'        => false,
+			'show_in_graphql'     => false,
+			'graphql_single_name' => 'persistedQuery',
+			'graphql_plural_name' => 'persistedQueries',
+			'show_ui'             => false,
+			'supports'            => [ 'title', 'editor' ],
+		];
 
-		register_post_type(
-			$this->post_type,
-			[
-				'label'               => 'Queries',
-				'public'              => false,
-				'query_var'           => false,
-				'rewrite'             => false,
-				'show_in_rest'        => false,
-				'show_in_graphql'     => $show_in_graphql,
-				'graphql_single_name' => 'persistedQuery',
-				'graphql_plural_name' => 'persistedQueries',
-				'show_ui'             => is_admin(),
-				'supports'            => [ 'title', 'editor' ],
-			]
-		);
+		/**
+		 * Post type args for persisted queries. Filter this to expose the post type
+		 * in the UI or in GraphQL.
+		 *
+		 * @param bool $post_type_args Register post type args.
+		 * @since 1.1.0
+		 */
+		$post_type_args = apply_filters( "{$this->namespace}_post_type_args", $post_type_args );
+
+		register_post_type( $this->post_type, $post_type_args );
 	}
 
 	/**
@@ -177,19 +204,34 @@ class Loader {
 	 * @param  string $name     Operation name
 	 * @return void
 	 */
-	public function save( $query_id, $query, $name = 'UnnamedQuery' ) {
+	private function save( $query_id, $query, $name = 'UnnamedQuery' ) {
 		// Check to see if the query has already been persisted. If so, we're done.
 		if ( ! empty( $this->load( $query_id ) ) ) {
 			return;
 		}
 
-		// Persist the query.
-		wp_insert_post( [
+		$post_data = [
 			'post_content' => $query,
 			'post_name'    => $query_id,
 			'post_title'   => $name,
 			'post_status'  => 'publish',
 			'post_type'    => $this->post_type,
-		] );
+		];
+
+		/**
+		 * Allow implementors to override persisted query.
+		 *
+		 * @param bool   $post_data Post data for persisted query.
+		 * @param string $query_id  Query ID.
+		 * @since 1.1.0
+		 */
+		$post_data = apply_filters( "{$this->namespace}_save_query", $post_data, $query_id );
+
+		if ( empty( $post_data ) ) {
+			return;
+		}
+
+		// Persist the query.
+		wp_insert_post( $post_data );
 	}
 }
